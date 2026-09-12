@@ -19,6 +19,7 @@ from jd_analyzer import analyze_jd
 from skill_extractor import extract_skills, extract_soft_skills
 from matcher import match_all_resumes_to_jd
 from explainer import generate_explanation
+from bias_flagger import analyze_jd_bias
 
 
 def load_jd(jd_path: str) -> dict:
@@ -48,6 +49,7 @@ def load_resumes(resume_dir: str) -> list:
 
 def run_pipeline(jd_path: str, resume_dir: str, top_n_explanations: int = 3) -> dict:
     jd_analysis = load_jd(jd_path)
+    bias_flags = analyze_jd_bias(jd_analysis["full_text"], jd_analysis)
     resumes = load_resumes(resume_dir)
 
     if not resumes:
@@ -92,6 +94,7 @@ def run_pipeline(jd_path: str, resume_dir: str, top_n_explanations: int = 3) -> 
     return {
         "jd_required_skills": sorted(jd_analysis["required_skills"]),
         "jd_preferred_skills": sorted(jd_analysis["preferred_skills"]),
+        "jd_bias_flags": bias_flags,
         "ranking_table": ranking_table,
         "top_explanations": explanations,
         "raw_results": results,
@@ -104,6 +107,15 @@ def print_report(output: dict):
     print("=" * 70)
     print(f"Required skills: {', '.join(output['jd_required_skills'])}")
     print(f"Preferred skills: {', '.join(output['jd_preferred_skills']) or 'none detected'}")
+
+    if output["jd_bias_flags"]:
+        print("\n" + "=" * 70)
+        print("JD BIAS / NARROW-PHRASING FLAGS")
+        print("=" * 70)
+        for f in output["jd_bias_flags"]:
+            print(f"[{f['severity'].upper()}] {f['type']}: {f['message']}")
+    else:
+        print("\nNo bias/narrow-phrasing flags raised for this JD.")
 
     print("\n" + "=" * 70)
     print("RANKED SHORTLIST")
@@ -132,6 +144,7 @@ if __name__ == "__main__":
     json_output = {
         "jd_required_skills": output["jd_required_skills"],
         "jd_preferred_skills": output["jd_preferred_skills"],
+        "jd_bias_flags": output["jd_bias_flags"],
         "ranking_table": output["ranking_table"],
         "top_explanations": output["top_explanations"],
     }

@@ -8,37 +8,76 @@ Falls back to treating all extracted skills as required if no clear sections exi
 import re
 from skill_extractor import extract_skills
 
+# NOTE: header phrases are matched *separator-agnostically* (see _phrase_to_pattern
+# below), so "must have" also matches "MUST-HAVE", "must_have", "musthave", etc.
+# We still list a few explicit variants (e.g. plurals) for clarity/robustness.
 REQUIRED_HEADERS = [
-    "requirements", "required skills", "must have", "must-have",
-    "minimum qualifications", "qualifications", "what you need", "essential"
+    "requirements", "required skills", "required qualifications",
+    "must have", "must haves", "minimum qualifications", "qualifications",
+    "what you need", "essential", "essential skills", "technical skills",
+    "core skills", "key skills",
 ]
 PREFERRED_HEADERS = [
-    "preferred", "nice to have", "nice-to-have", "bonus", "good to have",
-    "preferred qualifications", "plus"
+    "preferred", "preferred skills", "nice to have", "nice to haves",
+    "bonus", "good to have", "good to haves", "preferred qualifications",
+    "plus", "desired skills", "optional skills",
 ]
-SECTION_HEADER_PATTERN = re.compile(
-    r"^\s*(" + "|".join(REQUIRED_HEADERS + PREFERRED_HEADERS +
-                         ["responsibilities", "about", "role", "benefits", "who you are"]) +
-    r")\s*[:\-]?\s*$",
-    re.IGNORECASE | re.MULTILINE
+# Recognized headers that are neither required nor preferred (e.g. soft
+# skills, responsibilities). These still need to be recognized as section
+# boundaries so their content doesn't get swallowed into whichever
+# required/preferred section came before them.
+OTHER_HEADERS = [
+    "responsibilities", "about", "role", "benefits", "who you are",
+    "soft skills", "soft skill", "skills", "about the role", "about us",
+]
+
+ALL_HEADERS = REQUIRED_HEADERS + PREFERRED_HEADERS + OTHER_HEADERS
+
+
+def _norm_phrase(s: str) -> str:
+    """Lowercase and collapse hyphens/underscores/slashes/whitespace to a
+    single space, so 'GOOD-TO-HAVE', 'good_to_have' and 'good to have' all
+    normalize to the same key."""
+    return re.sub(r"[\s\-_/]+", " ", s.strip().lower())
+
+
+def _phrase_to_pattern(phrase: str) -> str:
+    """Turn a normalized header phrase into a regex that matches it with
+    any mix of spaces/hyphens/underscores/slashes between words."""
+    words = _norm_phrase(phrase).split(" ")
+    return r"[\s\-_/]+".join(re.escape(w) for w in words)
+
+
+REQUIRED_HEADERS_NORM = {_norm_phrase(h) for h in REQUIRED_HEADERS}
+PREFERRED_HEADERS_NORM = {_norm_phrase(h) for h in PREFERRED_HEADERS}
+
+# Longest phrases first so e.g. "required skills" wins over a shorter
+# alternative that happens to be a prefix of it.
+_HEADER_PATTERNS = sorted(
+    {_norm_phrase(h) for h in ALL_HEADERS}, key=len, reverse=True
+)
+HEADER_REGEX = re.compile(
+    r"^\s*(" + "|".join(_phrase_to_pattern(h) for h in _HEADER_PATTERNS) + r")\b.*$",
+    re.IGNORECASE,
 )
 
 
 def split_jd_sections(jd_text: str) -> dict:
-    """Split JD text into named sections based on header lines."""
+    """Split JD text into named sections based on header lines.
+
+    A line is treated as a new section header if it *starts* with one of the
+    known header phrases (separator-agnostic) and is short (looks like a
+    header, not a sentence). Sections are keyed by the normalized header
+    phrase so callers can classify them consistently.
+    """
     lines = jd_text.split("\n")
     sections = {"_preamble": []}
     current = "_preamble"
     for line in lines:
-        header_match = re.match(
-            r"^\s*(" + "|".join(REQUIRED_HEADERS + PREFERRED_HEADERS +
-                                 ["responsibilities", "about", "role", "benefits", "who you are"]) +
-            r")\b.*$",
-            line, re.IGNORECASE
-        )
+        header_match = HEADER_REGEX.match(line)
         if header_match and len(line.strip()) < 60:
-            current = header_match.group(1).lower()
-            sections[current] = []
+            current = _norm_phrase(header_match.group(1))
+            sections.setdefault(current, [])
         else:
             sections.setdefault(current, []).append(line)
     return {k: "\n".join(v) for k, v in sections.items()}
@@ -61,10 +100,13 @@ def analyze_jd(jd_text: str) -> dict:
     other_text_parts = []
 
     for section_name, content in sections.items():
-        lname = section_name.lower()
-        if any(h in lname for h in REQUIRED_HEADERS):
+        # section_name is already a normalized header phrase (see
+        # split_jd_sections), so this is an exact-set check, not a fragile
+        # substring check that could mis-tag e.g. a "role" section as
+        # "preferred" just because "role" was substringy with something.
+        if section_name in REQUIRED_HEADERS_NORM:
             required_text_parts.append(content)
-        elif any(h in lname for h in PREFERRED_HEADERS):
+        elif section_name in PREFERRED_HEADERS_NORM:
             preferred_text_parts.append(content)
         else:
             other_text_parts.append(content)

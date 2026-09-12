@@ -24,6 +24,7 @@ from jd_analyzer import analyze_jd
 from skill_extractor import extract_skills, extract_soft_skills
 from matcher import match_all_resumes_to_jd
 from explainer import generate_explanation, format_skill_list
+from bias_flagger import analyze_jd_bias
 
 st.set_page_config(page_title="Shortlisting Engine", page_icon="◆", layout="wide")
 
@@ -122,6 +123,33 @@ h1, h2, h3, .hero-title { font-family: 'Lora', serif; color: var(--ink); }
 .pill-required { background: var(--teal-soft); color: var(--teal); }
 .pill-preferred { background: var(--gold-soft); color: var(--gold); }
 
+/* Bias flag cards */
+.bias-card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--line);
+    border-radius: 10px;
+    padding: 0.9rem 1.1rem;
+    margin-bottom: 0.6rem;
+}
+.bias-card.sev-high { border-left-color: var(--coral); }
+.bias-card.sev-medium { border-left-color: var(--gold); }
+.bias-card.sev-low { border-left-color: var(--teal); }
+.bias-sev-tag {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 999px;
+    margin-right: 8px;
+}
+.bias-sev-tag.sev-high { background: var(--coral-soft); color: var(--coral); }
+.bias-sev-tag.sev-medium { background: var(--gold-soft); color: var(--gold); }
+.bias-sev-tag.sev-low { background: var(--teal-soft); color: var(--teal); }
+.bias-msg { font-size: 0.88rem; line-height: 1.5; margin-top: 6px; }
+.bias-evidence { color: var(--ink-soft); font-size: 0.78rem; margin-top: 4px; }
+
 /* Ranked candidate row */
 .rank-row {
     background: var(--card);
@@ -213,7 +241,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="formula-chip">final = 100 × (0.5 × keyword + 0.25 × semantic + 0.25 × learned)</div>',
+    '<div class="formula-chip">final = 100 × (0.5 × keyword + 0.5 × semantic) — '
+    'or, when a historical resume corpus is available, '
+    '100 × (0.50 × keyword + 0.25 × semantic + 0.25 × learned)</div>',
     unsafe_allow_html=True,
 )
 
@@ -401,6 +431,7 @@ if run_button:
                 jd_path = save_uploaded_file(jd_file, tmpdir)
                 jd_text = extract_text(jd_path)
                 jd_analysis = analyze_jd(jd_text)
+                jd_bias_flags = analyze_jd_bias(jd_text, jd_analysis)
 
                 training_zip = find_training_zip()
                 training_model = None
@@ -444,6 +475,7 @@ if run_button:
                 results.sort(key=lambda r: r["match"]["final_score"], reverse=True)
 
         st.session_state["jd_analysis"] = jd_analysis
+        st.session_state["jd_bias_flags"] = jd_bias_flags
         st.session_state["results"] = results
         st.session_state["training_count"] = training_model["count"] if training_model else 0
 
@@ -604,6 +636,22 @@ def answer_recruiter_question(question, results, jd_analysis):
 if "results" in st.session_state:
     jd_analysis = st.session_state["jd_analysis"]
     results = st.session_state["results"]
+    training_count = st.session_state.get("training_count", 0)
+
+    if training_count > 0:
+        st.markdown(
+            f'<div style="color:var(--teal); font-size:0.82rem; margin-bottom:10px;">'
+            f'Formula used for this run: <b>100 × (0.50 × keyword + 0.25 × semantic + '
+            f'0.25 × learned)</b> — a historical corpus of {training_count} resumes was found.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div style="color:var(--ink-soft); font-size:0.82rem; margin-bottom:10px;">'
+            'Formula used for this run: <b>100 × (0.5 × keyword + 0.5 × semantic)</b> — '
+            'no historical resume corpus was found, so the learned signal was not applied.</div>',
+            unsafe_allow_html=True,
+        )
 
     st.markdown('<div class="section-label">2 · Job Description Analysis</div>', unsafe_allow_html=True)
     req_pills = "".join(f'<span class="pill pill-required">{s.replace("_"," ").title()}</span>'
@@ -613,6 +661,38 @@ if "results" in st.session_state:
                  '<span style="color:var(--ink-soft); font-size:0.85rem;">none detected</span>'
     st.markdown(f'<div style="margin-bottom:6px;"><b>Required</b></div>{req_pills}', unsafe_allow_html=True)
     st.markdown(f'<div style="margin:14px 0 6px 0;"><b>Preferred</b></div>{pref_pills}', unsafe_allow_html=True)
+
+    bias_flags = st.session_state.get("jd_bias_flags", [])
+    st.markdown('<div class="section-label">JD Bias &amp; Narrow-Phrasing Check</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="color:var(--ink-soft); font-size:0.85rem; margin-bottom:10px;">'
+        'Heuristic, rule-based checks on the JD text itself — not a legal or HR audit, '
+        'just a first pass to catch phrasing that could unfairly exclude qualified candidates.</div>',
+        unsafe_allow_html=True,
+    )
+    if not bias_flags:
+        st.markdown(
+            '<div style="color:var(--ink-soft); font-size:0.9rem;">'
+            'No bias or overly-narrow phrasing flags were raised for this JD.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        for f in bias_flags:
+            sev = f["severity"]
+            evidence_html = (
+                f'<div class="bias-evidence">Evidence: {", ".join(f["evidence"][:8])}'
+                f'{"…" if len(f["evidence"]) > 8 else ""}</div>'
+                if f.get("evidence") else ""
+            )
+            st.markdown(
+                f'<div class="bias-card sev-{sev}">'
+                f'<span class="bias-sev-tag sev-{sev}">{sev}</span>'
+                f'<b>{f["type"].replace("_", " ").title()}</b>'
+                f'<div class="bias-msg">{f["message"]}</div>'
+                f'{evidence_html}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
     st.markdown('<div class="section-label">3 · Ranked Shortlist</div>', unsafe_allow_html=True)
     for i, r in enumerate(results, start=1):
