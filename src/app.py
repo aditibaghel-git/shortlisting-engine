@@ -7,7 +7,15 @@ Run with:
 import os
 import sys
 import tempfile
+import zipfile
+import re
+import xml.etree.ElementTree as ET
+import textwrap
+
+import numpy as np
 import streamlit as st
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -205,7 +213,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="formula-chip">final = 100 × (0.5 × keyword_score + 0.5 × semantic_score)</div>',
+    '<div class="formula-chip">final = 100 × (0.5 × keyword + 0.25 × semantic + 0.25 × learned)</div>',
     unsafe_allow_html=True,
 )
 
@@ -229,7 +237,7 @@ with col2:
         st.markdown('<div class="upload-card-label">Resumes</div>', unsafe_allow_html=True)
         st.markdown('<div class="upload-card-hint">Select the full batch — PDF or TXT</div>', unsafe_allow_html=True)
         resume_files = st.file_uploader(
-            "Upload Resumes", type=["pdf", "txt"], accept_multiple_files=True, key="resumes",
+            "Upload Resumes", type=["pdf", "txt", "docx"], accept_multiple_files=True, key="resumes",
             label_visibility="collapsed",
         )
 
@@ -237,6 +245,125 @@ st.write("")
 run_col, _ = st.columns([1, 3])
 with run_col:
     run_button = st.button("Run Matching →", type="primary", use_container_width=True)
+
+
+def _extract_docx_text(filepath):
+    """Extract paragraph/table text from a DOCX without requiring another parser module."""
+    try:
+        with zipfile.ZipFile(filepath) as z:
+            xml = z.read("word/document.xml")
+        root = ET.fromstring(xml)
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        parts = []
+        for para in root.findall(".//w:p", ns):
+            text = "".join((node.text or "") for node in para.findall(".//w:t", ns))
+            if text.strip():
+                parts.append(text)
+        return "\n".join(parts)
+    except Exception:
+        return ""
+
+
+def _extract_xml_text(filepath):
+    """Extract readable text from XML-like resume files."""
+    try:
+        root = ET.parse(filepath).getroot()
+        return "\n".join(t.strip() for t in root.itertext() if t and t.strip())
+    except Exception:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            return re.sub(r"<[^>]+>", " ", f.read())
+
+
+def extract_training_text(filepath):
+    """Read supported historical resume formats for the learned corpus."""
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext == ".docx":
+        raw = _extract_docx_text(filepath)
+    elif ext == ".xml":
+        raw = _extract_xml_text(filepath)
+    else:
+        raw = extract_text(filepath)
+    raw = re.sub(r"[ \t]+", " ", raw)
+    raw = re.sub(r"\n{3,}", "\n\n", raw)
+    return raw.strip()
+
+
+def find_training_zip():
+    """Find the historical resume ZIP without requiring another code file."""
+    base = os.path.dirname(__file__)
+    candidates = [
+        os.environ.get("TRAINING_RESUMES_ZIP", ""),
+        os.path.join(base, "training_resumes.zip"),
+        os.path.join(base, "data", "training_resumes.zip"),
+        os.path.join(base, "Dummy Resumes-20260912T080512Z-1-001.zip"),
+        os.path.join(base, "data", "Dummy Resumes-20260912T080512Z-1-001.zip"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+@st.cache_resource(show_spinner=False)
+def train_resume_corpus(zip_path, modified_time):
+    """Fit a TF-IDF representation on historical resumes.
+
+    This is unsupervised corpus training: it learns vocabulary/IDF statistics
+    from previous resumes, not recruiter selection labels.
+    """
+    texts = []
+    names = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with zipfile.ZipFile(zip_path) as z:
+            for member in z.infolist():
+                if member.is_dir():
+                    continue
+                ext = os.path.splitext(member.filename)[1].lower()
+                if ext not in {".pdf", ".txt", ".docx", ".xml"}:
+                    continue
+                safe_name = os.path.basename(member.filename)
+                if not safe_name:
+                    continue
+                path = os.path.join(tmpdir, safe_name)
+                with open(path, "wb") as f:
+                    f.write(z.read(member))
+                try:
+                    text = extract_training_text(path)
+                except Exception:
+                    text = ""
+                if len(text.split()) >= 5:
+                    texts.append(text)
+                    names.append(member.filename)
+
+    if not texts:
+        return None
+
+    vectorizer = TfidfVectorizer(
+        stop_words="english", ngram_range=(1, 2), min_df=1,
+        max_df=0.98, sublinear_tf=True,
+    )
+    try:
+        matrix = vectorizer.fit_transform(texts)
+    except ValueError:
+        return None
+    return {"vectorizer": vectorizer, "matrix": matrix, "count": len(texts), "names": names}
+
+
+def learned_semantic_scores(jd_text, resume_texts, model):
+    """Score new resumes against the JD in the vocabulary learned from history."""
+    if not model or not resume_texts:
+        return [None] * len(resume_texts)
+    try:
+        v = model["vectorizer"]
+        jd_vec = v.transform([jd_text])
+        resume_vecs = v.transform(resume_texts)
+        raw = cosine_similarity(jd_vec, resume_vecs)[0]
+        lo, hi = float(raw.min()), float(raw.max())
+        if hi - lo < 1e-9:
+            return raw.tolist()
+        return ((raw - lo) / (hi - lo)).tolist()
+    except Exception:
+        return [None] * len(resume_texts)
 
 
 def save_uploaded_file(uploaded_file, tmpdir):
@@ -275,10 +402,19 @@ if run_button:
                 jd_text = extract_text(jd_path)
                 jd_analysis = analyze_jd(jd_text)
 
+                training_zip = find_training_zip()
+                training_model = None
+                if training_zip:
+                    training_model = train_resume_corpus(training_zip, os.path.getmtime(training_zip))
+
                 resumes = []
                 for rf in resume_files:
                     rpath = save_uploaded_file(rf, tmpdir)
-                    text = extract_text(rpath)
+                    ext = os.path.splitext(rf.name)[1].lower()
+                    if ext == ".docx":
+                        text = extract_training_text(rpath)
+                    else:
+                        text = extract_text(rpath)
                     name = extract_candidate_name(text, fallback=os.path.splitext(rf.name)[0])
                     skills = extract_skills(text)
                     soft_skills = extract_soft_skills(text)
@@ -287,14 +423,29 @@ if run_button:
                     })
 
                 matches = match_all_resumes_to_jd(jd_analysis, resumes)
+                learned_scores = learned_semantic_scores(
+                    jd_text, [r["text"] for r in resumes], training_model
+                )
 
                 results = []
-                for resume, match in zip(resumes, matches):
+                for resume, match, learned_score in zip(resumes, matches, learned_scores):
+                    if learned_score is not None:
+                        # Keep the existing keyword signal dominant while allowing
+                        # historical resume language to influence semantic ranking.
+                        match["learned_semantic_score"] = round(float(learned_score), 4)
+                        match["final_score"] = round(100 * (
+                            0.50 * match["keyword_score"] +
+                            0.25 * match["semantic_score"] +
+                            0.25 * float(learned_score)
+                        ), 2)
+                    else:
+                        match["learned_semantic_score"] = None
                     results.append({"name": resume["name"], "soft_skills": resume["soft_skills"], "match": match})
                 results.sort(key=lambda r: r["match"]["final_score"], reverse=True)
 
         st.session_state["jd_analysis"] = jd_analysis
         st.session_state["results"] = results
+        st.session_state["training_count"] = training_model["count"] if training_model else 0
 
 
 # ----------------------------------------------------------------------------
@@ -343,7 +494,7 @@ def answer_recruiter_question(question, results, jd_analysis):
             f"**{name} is ranked #{rank} with a final score of {m['final_score']:.1f}/100.**",
             f"- **Required skills:** {len(m['matched_required'])}/{req_total} matched.",
             f"- **Keyword score:** {m['keyword_score']*100:.1f}%.",
-            f"- **Semantic score:** {m['semantic_score']*100:.1f}%.",
+            f"- **Semantic score:** {m['semantic_score']*100:.1f}%." + (f"\n- **Learned semantic score:** {m['learned_semantic_score']*100:.1f}%." if m.get("learned_semantic_score") is not None else ""),
         ]
         if m["matched_required"]:
             response.append(
@@ -436,7 +587,7 @@ def answer_recruiter_question(question, results, jd_analysis):
             f"**{top['name']} is currently #1 at {m['final_score']:.1f}/100.** "
             f"The engine combines keyword and semantic scores equally. "
             f"The keyword component emphasizes required skills (80%) over preferred skills (20%), "
-            f"while the semantic component uses TF-IDF context plus skill implications. "
+            f"while the semantic component uses TF-IDF context plus skill implications; when a historical resume corpus is available, a learned semantic signal is also included. "
             f"For a direct comparison, ask: **“Why is {top['name']} ranked above {names[1] if len(names) > 1 else 'Candidate Y'}?”**"
         )
 
@@ -468,30 +619,54 @@ if "results" in st.session_state:
         m = r["match"]
         kw_pct = round(m["keyword_score"] * 100, 1)
         sem_pct = round(m["semantic_score"] * 100, 1)
+        learned_pct = (
+            round(m["learned_semantic_score"] * 100, 1)
+            if m.get("learned_semantic_score") is not None else None
+        )
         req_matched = len(m["matched_required"])
         req_total = req_matched + len(m["missing_required"])
-        top_class = "top1" if i == 1 else ""
 
-        st.markdown(f"""
-        <div class="rank-row {top_class}">
-            <div class="rank-badge">#{i}</div>
-            <div style="flex:1;">
-                <div class="rank-name">{r['name']}</div>
-                <div class="rank-meta">{req_matched}/{req_total} required skills matched</div>
-                <div style="display:flex; gap:14px; margin-top:8px;">
-                    <div style="flex:1;">
-                        <div class="rank-meta">Keyword {kw_pct}%</div>
-                        <div class="subscore-bar-track"><div class="subscore-bar-fill" style="width:{kw_pct}%; background:{score_color(kw_pct)};"></div></div>
-                    </div>
-                    <div style="flex:1;">
-                        <div class="rank-meta">Semantic {sem_pct}%</div>
-                        <div class="subscore-bar-track"><div class="subscore-bar-fill" style="width:{sem_pct}%; background:{score_color(sem_pct)};"></div></div>
-                    </div>
-                </div>
-            </div>
-            <div class="rank-score">{m['final_score']:.1f}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        # Use native Streamlit layout here.  Avoid nested HTML divs because
+        # Streamlit's Markdown renderer can expose closing tags as text.
+        with st.container(border=True):
+            rank_col, info_col, score_col = st.columns([0.55, 3.6, 0.8], gap="medium")
+
+            with rank_col:
+                rank_color = "var(--teal)" if i == 1 else "var(--ink-soft)"
+                st.markdown(
+                    f'<div style="font-family:Lora,serif;font-size:1.5rem;font-weight:600;color:{rank_color};padding-top:18px;">#{i}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            with info_col:
+                st.markdown(
+                    f'<div class="rank-name">{r["name"]}</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'<div class="rank-meta">{req_matched}/{req_total} required skills matched</div>',
+                    unsafe_allow_html=True,
+                )
+
+                bar_cols = st.columns(3 if learned_pct is not None else 2, gap="medium")
+                bar_data = [("Keyword", kw_pct), ("Semantic", sem_pct)]
+                if learned_pct is not None:
+                    bar_data.append(("Learned", learned_pct))
+
+                for bcol, (label, pct) in zip(bar_cols, bar_data):
+                    with bcol:
+                        st.markdown(
+                            f'<div class="rank-meta">{label} {pct}%</div>',
+                            unsafe_allow_html=True,
+                        )
+                        st.progress(min(max(pct / 100, 0.0), 1.0), text=None)
+
+            with score_col:
+                st.markdown(
+                    f'<div style="font-family:Lora,serif;font-size:1.6rem;font-weight:700;text-align:right;padding-top:14px;">{m["final_score"]:.1f}</div>',
+                    unsafe_allow_html=True,
+                )
+
 
     st.markdown('<div class="section-label">4 · Top 3 — Why They Ranked There</div>', unsafe_allow_html=True)
     cols = st.columns(min(3, len(results)))
@@ -506,20 +681,40 @@ if "results" in st.session_state:
                               for s in sorted(m["matched_preferred"]))
 
         with col:
-            st.markdown(f"""
-            <div class="explain-card">
-                <span class="explain-rank-tag">Rank #{i}</span>
-                <span class="explain-score">{m['final_score']:.1f}</span>
-                <div style="font-weight:600; font-size:1.05rem; margin:6px 0 10px 0;">{r['name']}</div>
-                <div class="explain-row"><b>Matched required</b><br>{matched_html}</div>
-                <div class="explain-row"><b>Missing required</b><br>{missing_html}</div>
-                {'<div class="explain-row"><b>Bonus skills</b><br>' + bonus_html + '</div>' if bonus_html else ''}
-                <div class="explain-row" style="margin-top:12px;">
-                    <span class="{vclass}">{vlabel}</span>
-                    <span style="color:var(--ink-soft);"> · semantic standing: {round(m['semantic_score']*100)}% relative to this pool</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            # Build this card from separate Streamlit elements instead of one large
+            # HTML blob.  This prevents Streamlit from displaying conditional HTML
+            # as literal text in cards where optional sections differ.
+            with st.container(border=True):
+                head_left, head_right = st.columns([3, 1])
+                with head_left:
+                    st.markdown(f'<span class="explain-rank-tag">Rank #{i}</span>', unsafe_allow_html=True)
+                with head_right:
+                    st.markdown(
+                        f'<div class="explain-score" style="text-align:right;">{m["final_score"]:.1f}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                st.markdown(
+                    f'<div style="font-weight:600; font-size:1.05rem; margin:6px 0 10px 0;">{r["name"]}</div>',
+                    unsafe_allow_html=True,
+                )
+
+                st.markdown('<div class="explain-row"><b>Matched required</b></div>', unsafe_allow_html=True)
+                st.markdown(matched_html, unsafe_allow_html=True)
+
+                st.markdown('<div class="explain-row"><b>Missing required</b></div>', unsafe_allow_html=True)
+                st.markdown(missing_html, unsafe_allow_html=True)
+
+                if bonus_html:
+                    st.markdown('<div class="explain-row"><b>Bonus skills</b></div>', unsafe_allow_html=True)
+                    st.markdown(bonus_html, unsafe_allow_html=True)
+
+                # Keep the verdict as native Markdown.  Do not inject a nested HTML
+                # block here; Streamlit can expose that HTML literally when cards have
+                # different optional content.
+                st.markdown(
+                    f'**{vlabel}** · semantic standing: {round(m["semantic_score"] * 100)}% relative to this pool'
+                )
 
     st.markdown('<div class="section-label">5 · Compare Two Candidates</div>', unsafe_allow_html=True)
     st.markdown('<div style="color:var(--ink-soft); font-size:0.85rem; margin-bottom:10px;">'
@@ -546,14 +741,14 @@ if "results" in st.session_state:
             req_matched = len(m["matched_required"])
             req_total = req_matched + len(m["missing_required"])
             with col:
-                st.markdown(f"""
+                st.markdown(textwrap.dedent(f"""
                 <div class="explain-card">
                     <div style="font-weight:600; font-size:1rem; margin-bottom:8px;">{name}</div>
                     <div class="explain-row">Final score: <b>{m['final_score']:.1f}</b></div>
                     <div class="explain-row">Keyword: {round(m['keyword_score']*100,1)}% · Semantic: {round(m['semantic_score']*100,1)}%</div>
                     <div class="explain-row">Required matched: {req_matched}/{req_total}</div>
                 </div>
-                """, unsafe_allow_html=True)
+                """), unsafe_allow_html=True)
 
         only_a = ma["matched_required"] - mb["matched_required"]
         only_b = mb["matched_required"] - ma["matched_required"]

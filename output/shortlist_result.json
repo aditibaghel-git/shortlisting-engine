@@ -1,0 +1,62 @@
+{
+  "jd_required_skills": [
+    "css",
+    "database",
+    "git",
+    "html",
+    "javascript",
+    "mongodb",
+    "node.js",
+    "react",
+    "rest_api"
+  ],
+  "jd_preferred_skills": [
+    "ci_cd",
+    "docker",
+    "testing",
+    "typescript"
+  ],
+  "ranking_table": [
+    {
+      "rank": 1,
+      "name": "Priya Sharma",
+      "final_score": 95.56,
+      "keyword_score": 91.1,
+      "semantic_score": 100.0,
+      "required_skills_matched": "8/9"
+    },
+    {
+      "rank": 2,
+      "name": "Arjun Mehta",
+      "final_score": 44.38,
+      "keyword_score": 44.4,
+      "semantic_score": 44.3,
+      "required_skills_matched": "5/9"
+    },
+    {
+      "rank": 3,
+      "name": "Sanya Kapoor",
+      "final_score": 1.39,
+      "keyword_score": 0.0,
+      "semantic_score": 2.8,
+      "required_skills_matched": "0/9"
+    }
+  ],
+  "top_explanations": [
+    {
+      "rank": 1,
+      "name": "Priya Sharma",
+      "explanation": "Rank #1: Priya Sharma \u2014 Final Score: 95.6/100\n\u2705 Matched required skills: Css, Git, Html, Javascript, Mongodb, Node.Js, React, Rest Api (8/9 required skills covered).\n\u274c Missing required skills: Database.\n\u2795 Also brings preferred/bonus skills: Ci Cd, Docker, Testing, Typescript.\n\ud83d\udcc4 Resume content also shows strong contextual alignment with the JD's language and focus areas, relative to the rest of this candidate pool.\nOverall: partial fit \u2014 covers a majority of required skills but has some gaps."
+    },
+    {
+      "rank": 2,
+      "name": "Arjun Mehta",
+      "explanation": "Rank #2: Arjun Mehta \u2014 Final Score: 44.4/100\n\u2705 Matched required skills: Css, Database, Git, Html, Javascript (5/9 required skills covered).\n\u274c Missing required skills: Mongodb, Node.Js, React, Rest Api.\n\ud83d\udcc4 Resume shows moderate contextual alignment with the JD relative to the rest of this candidate pool.\nOverall: partial fit \u2014 covers a majority of required skills but has some gaps."
+    },
+    {
+      "rank": 3,
+      "name": "Sanya Kapoor",
+      "explanation": "Rank #3: Sanya Kapoor \u2014 Final Score: 1.4/100\n\u26a0\ufe0f No required skills were directly matched by keyword.\n\u274c Missing required skills: Css, Database, Git, Html, Javascript, Mongodb, Node.Js, React, Rest Api.\n\ud83d\udcc4 Resume shows relatively low contextual overlap with the JD compared to other candidates in this pool.\nOverall: weak fit \u2014 significant gaps in required skills for this role."
+    }
+  ]
+}
